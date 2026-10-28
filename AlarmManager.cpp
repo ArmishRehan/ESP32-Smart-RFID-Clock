@@ -214,6 +214,13 @@ void AlarmManager::setSettings(
     const AlarmSettings &newSettings
 )
 {
+    bool timeChanged =
+        newSettings.hour != settings.hour ||
+        newSettings.minute != settings.minute ||
+        newSettings.pm != settings.pm ||
+        newSettings.enabled != settings.enabled;
+
+
     settings = newSettings;
 
 
@@ -269,21 +276,25 @@ void AlarmManager::setSettings(
     // If user changes the alarm while the current
     // alarm is active, stop it.
     //
-    // We should reset alarmTriggeredToday to false
-    // so the new alarm time can trigger today!
+    // If the alarm time changed, reset
+    // alarmTriggeredToday so the new alarm time can
+    // trigger today. If only volume / sound changed,
+    // keep it, otherwise an alarm dismissed a few
+    // seconds ago would fire again in the same minute.
     //
 
     alarmActive = false;
 
-    alarmTriggeredToday = false;
+    if (timeChanged)
+    {
+        alarmTriggeredToday = false;
 
+        CurrentTime current =
+            TimeManager::getCurrentTime();
 
-    CurrentTime current =
-        TimeManager::getCurrentTime();
-
-
-    lastTriggeredDay =
-        current.day;
+        lastTriggeredDay =
+            current.day;
+    }
 
 
     Serial.println();
@@ -298,6 +309,39 @@ void AlarmManager::setSettings(
         settings.pm
             ? "PM"
             : "AM"
+    );
+
+    Serial.printf(
+        "Sound: %s\n",
+        settings.soundName
+    );
+}
+
+
+// =====================================================
+// SET SOUND ONLY
+// =====================================================
+//
+// Changes the alarm sound without touching the
+// alarm state (used when a sound is deleted).
+//
+
+void AlarmManager::setSound(
+    const String &soundName
+)
+{
+    strncpy(
+        settings.soundName,
+        soundName.c_str(),
+        sizeof(settings.soundName) - 1
+    );
+
+    settings.soundName[
+        sizeof(settings.soundName) - 1
+    ] = '\0';
+
+    Storage::saveAlarm(
+        settings
     );
 }
 

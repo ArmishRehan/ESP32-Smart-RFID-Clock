@@ -20,6 +20,10 @@ public:
         const AlarmSettings &settings
     );
 
+    static void setSound(
+        const String &soundName
+    );
+
     static bool isActive();
 
     static bool wasTriggered();

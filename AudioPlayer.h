@@ -10,15 +10,27 @@ public:
 
     static void begin();
 
-    static void start();
+    static void start(
+        const String &soundName = "",
+        unsigned long maxDurationMs = 0
+    );
 
     static void stop();
 
     static bool isPlaying();
 
+    static bool isPreview();
+
+    static bool checkWavFile(
+        const String &path,
+        String &error
+    );
+
 private:
 
     static volatile bool playing;
+
+    static void audioTask(void *param);
 };
 
 

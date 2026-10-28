@@ -18,7 +18,7 @@ struct AlarmSettings
 
     int volume;
 
-    char soundName[32];
+    char soundName[64];
 };
 
 

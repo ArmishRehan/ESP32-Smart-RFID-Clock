@@ -30,10 +30,10 @@ void TimeManager::begin()
     connectWiFi();
 
 
-    if (WiFi.status() == WL_CONNECTED)
-    {
-        syncTime();
-    }
+    // SNTP keeps running in the background and
+    // re-syncs by itself whenever Wi-Fi is up
+
+    syncTime();
 }
 
 
@@ -48,6 +48,8 @@ void TimeManager::connectWiFi()
 
 
     WiFi.mode(WIFI_STA);
+
+    WiFi.setAutoReconnect(true);
 
     WiFi.begin(
         WIFI_SSID,
@@ -121,12 +123,11 @@ void TimeManager::syncTime()
 
 
     while (
-        !getLocalTime(&timeInfo) &&
+        WiFi.status() == WL_CONNECTED &&
+        !getLocalTime(&timeInfo, 500) &&
         attempts < 20
     )
     {
-        delay(500);
-
         Serial.print(".");
 
         attempts++;
@@ -136,7 +137,7 @@ void TimeManager::syncTime()
     Serial.println();
 
 
-    if (attempts < 20)
+    if (getLocalTime(&timeInfo, 0))
     {
         synced = true;
 
@@ -158,7 +159,8 @@ void TimeManager::syncTime()
         synced = false;
 
         Serial.println(
-            "Time synchronization FAILED!"
+            "Time synchronization FAILED! "
+            "Will keep retrying in background."
         );
     }
 }
@@ -173,38 +175,87 @@ void TimeManager::loop()
     unsigned long now = millis();
 
 
-    // Check Wi-Fi every 10 seconds
+    // Check Wi-Fi / time every 10 seconds
 
     if (
-        now - lastWiFiCheck >= 10000
+        now - lastWiFiCheck < 10000
     )
     {
-        lastWiFiCheck = now;
+        return;
+    }
+
+    lastWiFiCheck = now;
 
 
-        if (
-            WiFi.status() != WL_CONNECTED
-        )
+    // -------------------------------------------------
+    // Once the clock has been set it keeps running
+    // without Wi-Fi, so a dropped connection must NOT
+    // stop the alarm from ringing.
+    // -------------------------------------------------
+
+    struct tm timeInfo;
+
+    if (
+        !synced &&
+        getLocalTime(&timeInfo, 0)
+    )
+    {
+        synced = true;
+
+        Serial.println(
+            "Time synchronized!"
+        );
+    }
+
+
+    // -------------------------------------------------
+    // Reconnect without blocking the main loop
+    // (web server, RFID and alarm keep running)
+    // -------------------------------------------------
+
+    static bool wasConnected = true;
+
+    bool connected =
+        WiFi.status() == WL_CONNECTED;
+
+    // Auto-reconnect handles short drops; only
+    // kick it every 30 s so we don't interrupt an
+    // attempt that is still in progress
+
+    static unsigned long lastReconnect = 0;
+
+    if (!connected)
+    {
+        if (wasConnected)
         {
             Serial.println(
-                "Wi-Fi disconnected."
+                "Wi-Fi disconnected. Reconnecting..."
             );
 
+            lastReconnect = now;
+        }
+        else if (now - lastReconnect >= 30000)
+        {
+            lastReconnect = now;
 
-            synced = false;
+            WiFi.disconnect();
 
-
-            connectWiFi();
-
-
-            if (
-                WiFi.status() == WL_CONNECTED
-            )
-            {
-                syncTime();
-            }
+            WiFi.begin(
+                WIFI_SSID,
+                WIFI_PASSWORD
+            );
         }
     }
+    else if (!wasConnected)
+    {
+        Serial.print("Wi-Fi reconnected. IP: ");
+
+        Serial.println(
+            WiFi.localIP()
+        );
+    }
+
+    wasConnected = connected;
 }
 
 
@@ -231,7 +282,7 @@ CurrentTime TimeManager::getCurrentTime()
 
 
     if (
-        !getLocalTime(&timeInfo)
+        !getLocalTime(&timeInfo, 10)
     )
     {
         current.hour24 = 0;

@@ -3,6 +3,8 @@
 
 #include <Arduino.h>
 
+#include "Config.h"
+
 
 class SoundManager
 {
@@ -10,9 +12,13 @@ public:
 
     static void begin();
 
+    static void rescan();
+
     static int getSoundCount();
 
     static String getSoundName(int index);
+
+    static bool isBuiltin(const String &name);
 
     static bool isBuiltinSelected();
 
@@ -26,7 +32,7 @@ public:
         const String &name
     );
 
-    static bool addSound(
+    static String sanitizeName(
         const String &filename
     );
 
@@ -38,11 +44,15 @@ public:
         const String &name
     );
 
+    static bool hasRoomFor(
+        const String &name
+    );
+
 private:
 
     static void scanSounds();
 
-    static String sounds[6];
+    static String sounds[MAX_WAV_FILES + 1];
 
     static int soundCount;
 };

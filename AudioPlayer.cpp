@@ -17,40 +17,42 @@
 // AUDIO SETTINGS
 // =====================================================
 
-#define SAMPLE_RATE     16000
+#define SAMPLE_RATE     AUDIO_SAMPLE_RATE
 
 #define AMPLITUDE       24000
 
 #define CHUNK_SIZE      256
 
-#define TASK_STACK       4096
+#define TASK_STACK       8192
 
 #define TASK_PRIORITY    5
 
 #define TASK_CORE        1
 
+#define WAV_FORMAT_PCM          0x0001
+#define WAV_FORMAT_EXTENSIBLE   0xFFFE
+
 
 
 // =====================================================
-// WAV HEADER
+// WAV INFO
 // =====================================================
+//
+// Filled in by parseWav() after walking the RIFF
+// chunks. fmt / data may appear in any order and
+// may be preceded by LIST, JUNK, bext ... chunks.
+//
 
-#pragma pack(push, 1)
-struct WavHeader
+struct WavInfo
 {
-    char     riff[4];
-    uint32_t fileSize;
-    char     wave[4];
-    char     fmt[4];
-    uint32_t fmtSize;
     uint16_t audioFormat;
     uint16_t numChannels;
     uint32_t sampleRate;
-    uint32_t byteRate;
-    uint16_t blockAlign;
     uint16_t bitsPerSample;
+
+    uint32_t dataOffset;
+    uint32_t dataSize;
 };
-#pragma pack(pop)
 
 
 
@@ -99,13 +101,23 @@ volatile bool AudioPlayer::playing = false;
 
 static TaskHandle_t audioTaskHandle = NULL;
 
+// Sound chosen at start() time, read by the task
+
+static char currentSound[sizeof(AlarmSettings::soundName)];
+
+// 0 = play until stop(), otherwise millis() deadline
+
+static volatile unsigned long stopAt = 0;
+
 
 
 // =====================================================
 // FORWARD DECLARATIONS
 // =====================================================
 
-static void audioTaskFunc(void *param);
+
+
+static bool keepPlaying();
 
 static bool playTone(
     int frequency,
@@ -118,8 +130,10 @@ static void playWavFile(
     const String &path
 );
 
-static bool validateWav(
-    WavHeader &header
+static bool parseWav(
+    File &file,
+    WavInfo &info,
+    String &error
 );
 
 
@@ -156,18 +170,25 @@ void AudioPlayer::begin()
 
     i2s_pin_config_t pins = {};
 
+    pins.mck_io_num   = I2S_PIN_NO_CHANGE;
     pins.bck_io_num   = I2S_BCLK_PIN;
     pins.ws_io_num    = I2S_LRC_PIN;
     pins.data_out_num = I2S_DOUT_PIN;
     pins.data_in_num  = I2S_PIN_NO_CHANGE;
 
 
-    i2s_driver_install(
-        I2S_NUM_0,
-        &config,
-        0,
-        NULL
-    );
+    if (
+        i2s_driver_install(
+            I2S_NUM_0,
+            &config,
+            0,
+            NULL
+        ) != ESP_OK
+    )
+    {
+        Serial.println("I2S driver install FAILED!");
+        return;
+    }
 
 
     i2s_set_pin(
@@ -189,8 +210,18 @@ void AudioPlayer::begin()
 // =====================================================
 // START
 // =====================================================
+//
+// soundName: "" = the sound saved in the alarm
+//            settings, otherwise a specific sound
+//            (used by the web "Test" button).
+//
+// maxDurationMs: 0 = play until stop()
+//
 
-void AudioPlayer::start()
+void AudioPlayer::start(
+    const String &soundName,
+    unsigned long maxDurationMs
+)
 {
     if (playing)
     {
@@ -198,17 +229,52 @@ void AudioPlayer::start()
     }
 
 
+    // An old task may still be finishing
+
+    if (audioTaskHandle != NULL)
+    {
+        return;
+    }
+
+
+    String sound = soundName;
+
+    if (sound.length() == 0)
+    {
+        sound = AlarmManager::getSettings().soundName;
+    }
+
+    strncpy(
+        currentSound,
+        sound.c_str(),
+        sizeof(currentSound) - 1
+    );
+
+    currentSound[sizeof(currentSound) - 1] = '\0';
+
+
+    stopAt =
+        (maxDurationMs > 0)
+            ? millis() + maxDurationMs
+            : 0;
+
+
     Serial.println();
     Serial.println("==============================");
     Serial.println("AUDIO START");
     Serial.println("==============================");
 
+    Serial.printf(
+        "Sound: %s\n",
+        currentSound
+    );
+
 
     playing = true;
 
 
-    xTaskCreatePinnedToCore(
-        audioTaskFunc,
+    BaseType_t ok = xTaskCreatePinnedToCore(
+        audioTask,
         "audioTask",
         TASK_STACK,
         NULL,
@@ -216,6 +282,15 @@ void AudioPlayer::start()
         &audioTaskHandle,
         TASK_CORE
     );
+
+    if (ok != pdPASS)
+    {
+        Serial.println("Audio task create FAILED!");
+
+        audioTaskHandle = NULL;
+
+        playing = false;
+    }
 }
 
 
@@ -226,7 +301,7 @@ void AudioPlayer::start()
 
 void AudioPlayer::stop()
 {
-    if (!playing)
+    if (!playing && audioTaskHandle == NULL)
     {
         return;
     }
@@ -241,9 +316,18 @@ void AudioPlayer::stop()
     playing = false;
 
 
-    // Wait for task to finish
+    // Wait for the task to actually exit so two
+    // tasks never write to I2S at the same time
 
-    vTaskDelay(pdMS_TO_TICKS(50));
+    unsigned long waitStart = millis();
+
+    while (
+        audioTaskHandle != NULL &&
+        millis() - waitStart < 1000
+    )
+    {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
 
 
     // Silence the output
@@ -262,6 +346,41 @@ void AudioPlayer::stop()
 bool AudioPlayer::isPlaying()
 {
     return playing;
+}
+
+
+
+// =====================================================
+// IS PREVIEW (time-limited test playback)
+// =====================================================
+
+bool AudioPlayer::isPreview()
+{
+    return playing && stopAt != 0;
+}
+
+
+
+// =====================================================
+// KEEP PLAYING? (called from the audio task)
+// =====================================================
+
+static bool keepPlaying()
+{
+    if (!AudioPlayer::isPlaying())
+    {
+        return false;
+    }
+
+    if (
+        stopAt != 0 &&
+        (long)(millis() - stopAt) >= 0
+    )
+    {
+        return false;
+    }
+
+    return true;
 }
 
 
@@ -298,7 +417,7 @@ static bool playTone(
         samplesWritten < totalSamples
     )
     {
-        if (!AudioPlayer::isPlaying())
+        if (!keepPlaying())
         {
             return false;
         }
@@ -357,15 +476,18 @@ static bool playTone(
 
 static void playBuiltinMelody()
 {
-    while (AudioPlayer::isPlaying())
+    // A failed WAV may have changed the rate
+
+    i2s_set_sample_rates(
+        I2S_NUM_0,
+        SAMPLE_RATE
+    );
+
+
+    while (keepPlaying())
     {
         for (int i = 0; i < numNotes; i++)
         {
-            if (!AudioPlayer::isPlaying())
-            {
-                return;
-            }
-
             bool ok = playTone(
                 melody[i][0],
                 melody[i][1]
@@ -380,7 +502,7 @@ static void playBuiltinMelody()
 
         // Gap between repetitions
 
-        if (AudioPlayer::isPlaying())
+        if (keepPlaying())
         {
             vTaskDelay(
                 pdMS_TO_TICKS(400)
@@ -392,53 +514,204 @@ static void playBuiltinMelody()
 
 
 // =====================================================
-// VALIDATE WAV HEADER
+// PARSE WAV
 // =====================================================
+//
+// Walks every RIFF chunk looking for "fmt " and
+// "data". Leaves the file positioned at the start
+// of the audio data on success.
+//
 
-static bool validateWav(
-    WavHeader &header
+static bool parseWav(
+    File &file,
+    WavInfo &info,
+    String &error
 )
 {
-    if (
-        strncmp(header.riff, "RIFF", 4) != 0
-    )
-    {
-        Serial.println("WAV: Not RIFF");
-        return false;
-    }
+    uint8_t riff[12];
 
     if (
-        strncmp(header.wave, "WAVE", 4) != 0
+        file.read(riff, 12) != 12 ||
+        memcmp(riff, "RIFF", 4) != 0 ||
+        memcmp(riff + 8, "WAVE", 4) != 0
     )
     {
-        Serial.println("WAV: Not WAVE");
+        error = "Not a WAV file";
         return false;
     }
 
-    if (header.audioFormat != 1)
+
+    bool foundFmt = false;
+    bool foundData = false;
+
+    uint32_t fileSize = file.size();
+    uint32_t pos = 12;
+
+
+    while (pos + 8 <= fileSize)
     {
-        Serial.println(
-            "WAV: Not PCM format"
-        );
-        return false;
+        file.seek(pos);
+
+        char chunkId[4];
+        uint32_t chunkSize;
+
+        if (
+            file.read((uint8_t *)chunkId, 4) != 4 ||
+            file.read((uint8_t *)&chunkSize, 4) != 4
+        )
+        {
+            break;
+        }
+
+
+        uint32_t body = pos + 8;
+
+
+        if (memcmp(chunkId, "fmt ", 4) == 0)
+        {
+            uint8_t fmt[16];
+
+            if (
+                chunkSize < 16 ||
+                file.read(fmt, 16) != 16
+            )
+            {
+                error = "Bad fmt chunk";
+                return false;
+            }
+
+            info.audioFormat   = fmt[0]  | (fmt[1]  << 8);
+            info.numChannels   = fmt[2]  | (fmt[3]  << 8);
+            info.sampleRate    = fmt[4]  | (fmt[5]  << 8) |
+                                 (fmt[6] << 16) | ((uint32_t)fmt[7] << 24);
+            info.bitsPerSample = fmt[14] | (fmt[15] << 8);
+
+            foundFmt = true;
+        }
+        else if (memcmp(chunkId, "data", 4) == 0)
+        {
+            info.dataOffset = body;
+
+            // Some encoders write 0 / 0xFFFFFFFF
+            // when streaming; clamp to the file
+
+            if (
+                chunkSize == 0 ||
+                body + chunkSize > fileSize
+            )
+            {
+                chunkSize = fileSize - body;
+            }
+
+            info.dataSize = chunkSize;
+
+            foundData = true;
+        }
+
+
+        if (foundFmt && foundData)
+        {
+            break;
+        }
+
+
+        // Chunks are padded to an even size
+
+        pos = body + chunkSize + (chunkSize & 1);
     }
 
-    if (header.bitsPerSample != 16)
+
+    if (!foundFmt)
     {
-        Serial.println(
-            "WAV: Not 16-bit"
-        );
+        error = "No fmt chunk";
         return false;
     }
 
-    Serial.printf(
-        "WAV: %d Hz, %d ch, %d bit\n",
-        header.sampleRate,
-        header.numChannels,
-        header.bitsPerSample
-    );
+    if (!foundData)
+    {
+        error = "No data chunk";
+        return false;
+    }
+
+    if (
+        info.audioFormat != WAV_FORMAT_PCM &&
+        info.audioFormat != WAV_FORMAT_EXTENSIBLE
+    )
+    {
+        error = "Not PCM (compressed WAV)";
+        return false;
+    }
+
+    if (
+        info.bitsPerSample != 8 &&
+        info.bitsPerSample != 16
+    )
+    {
+        error = "Must be 8 or 16-bit (file is " +
+                String(info.bitsPerSample) + "-bit)";
+        return false;
+    }
+
+    if (
+        info.numChannels != 1 &&
+        info.numChannels != 2
+    )
+    {
+        error = "Must be mono or stereo";
+        return false;
+    }
+
+    if (
+        info.sampleRate < 8000 ||
+        info.sampleRate > 48000
+    )
+    {
+        error = "Sample rate must be 8000-48000 Hz";
+        return false;
+    }
+
+
+    file.seek(info.dataOffset);
 
     return true;
+}
+
+
+
+// =====================================================
+// CHECK WAV FILE (used after upload)
+// =====================================================
+
+bool AudioPlayer::checkWavFile(
+    const String &path,
+    String &error
+)
+{
+    File file = LittleFS.open(path, "r");
+
+    if (!file)
+    {
+        error = "File not found";
+        return false;
+    }
+
+    WavInfo info;
+
+    bool ok = parseWav(file, info, error);
+
+    file.close();
+
+    if (ok)
+    {
+        Serial.printf(
+            "WAV OK: %u Hz, %u ch, %u bit\n",
+            info.sampleRate,
+            info.numChannels,
+            info.bitsPerSample
+        );
+    }
+
+    return ok;
 }
 
 
@@ -457,7 +730,16 @@ static void playWavFile(
     );
 
 
-    while (AudioPlayer::isPlaying())
+    // Stereo output buffer: L,R,L,R...
+
+    int16_t out[CHUNK_SIZE * 2];
+
+    // Raw file data (up to 16-bit stereo)
+
+    uint8_t raw[CHUNK_SIZE * 2 * sizeof(int16_t)];
+
+
+    while (keepPlaying())
     {
         File file = LittleFS.open(path, "r");
 
@@ -473,19 +755,15 @@ static void playWavFile(
         }
 
 
-        // Read and validate header
+        WavInfo info;
+        String error;
 
-        WavHeader header;
-
-        if (
-            file.read(
-                (uint8_t *)&header,
-                sizeof(WavHeader)
-            ) != sizeof(WavHeader)
-        )
+        if (!parseWav(file, info, error))
         {
-            Serial.println(
-                "WAV: Header read failed"
+            Serial.printf(
+                "WAV error: %s. "
+                "Falling back to builtin.\n",
+                error.c_str()
             );
 
             file.close();
@@ -493,100 +771,91 @@ static void playWavFile(
             return;
         }
 
-
-        if (!validateWav(header))
-        {
-            file.close();
-            playBuiltinMelody();
-            return;
-        }
-
-
-        // Reconfigure I2S sample rate
-        // if WAV differs
 
         i2s_set_sample_rates(
             I2S_NUM_0,
-            header.sampleRate
+            info.sampleRate
         );
 
 
-        // Skip to data chunk
-        //
-        // Standard WAV: data starts at
-        // byte 44. But some WAVs have
-        // extra chunks. Search for "data".
+        int volume = AlarmManager::getSettings().volume;
 
-        file.seek(12);
+        bool mono = (info.numChannels == 1);
 
-        char chunkId[4];
-        uint32_t chunkSize;
+        bool eightBit = (info.bitsPerSample == 8);
 
-        bool foundData = false;
+        size_t sampleBytes = eightBit ? 1 : 2;
 
-        while (file.available() >= 8)
-        {
-            file.read(
-                (uint8_t *)chunkId, 4
-            );
+        size_t frameBytes = info.numChannels * sampleBytes;
 
-            file.read(
-                (uint8_t *)&chunkSize, 4
-            );
+        uint32_t remaining = info.dataSize;
 
-            if (
-                strncmp(chunkId, "data", 4) == 0
-            )
-            {
-                foundData = true;
-                break;
-            }
-
-            // Skip this chunk
-
-            file.seek(
-                file.position() + chunkSize
-            );
-        }
-
-
-        if (!foundData)
-        {
-            Serial.println(
-                "WAV: No data chunk"
-            );
-
-            file.close();
-            playBuiltinMelody();
-            return;
-        }
-
-
-        // Stream audio data
-
-        uint8_t buffer[1024];
-        size_t bytesRead;
-        size_t bytesWritten;
 
         while (
-            file.available() &&
-            AudioPlayer::isPlaying()
+            remaining >= frameBytes &&
+            keepPlaying()
         )
         {
-            bytesRead = file.read(
-                buffer,
-                sizeof(buffer)
-            );
+            size_t want = CHUNK_SIZE * frameBytes;
 
-            if (bytesRead == 0)
+            if (want > remaining)
+            {
+                want = remaining - (remaining % frameBytes);
+            }
+
+
+            size_t bytesRead = file.read(raw, want);
+
+            if (bytesRead < frameBytes)
             {
                 break;
             }
+
+            remaining -= bytesRead;
+
+
+            // Convert to 16-bit stereo with volume
+
+            size_t frames = bytesRead / frameBytes;
+
+            for (size_t i = 0; i < frames; i++)
+            {
+                for (int ch = 0; ch < 2; ch++)
+                {
+                    // Mono: same sample on L and R
+
+                    size_t idx =
+                        i * info.numChannels +
+                        (mono ? 0 : ch);
+
+                    int32_t s;
+
+                    if (eightBit)
+                    {
+                        // 8-bit WAV is unsigned
+
+                        s = ((int32_t)raw[idx] - 128) << 8;
+                    }
+                    else
+                    {
+                        s = (int16_t)(
+                            raw[idx * 2] |
+                            (raw[idx * 2 + 1] << 8)
+                        );
+                    }
+
+                    out[i * 2 + ch] =
+                        (int16_t)(s * volume / 100);
+                }
+            }
+
+
+            size_t bytesWritten = 0;
 
             i2s_write(
                 I2S_NUM_0,
-                buffer,
-                bytesRead,
+                out,
+                frames * 2 * sizeof(int16_t),
                 &bytesWritten,
                 portMAX_DELAY
             );
@@ -598,7 +867,7 @@ static void playWavFile(
 
         // Small gap before looping
 
-        if (AudioPlayer::isPlaying())
+        if (keepPlaying())
         {
             vTaskDelay(
                 pdMS_TO_TICKS(200)
@@ -621,24 +890,22 @@ static void playWavFile(
 // AUDIO TASK
 // =====================================================
 
-static void audioTaskFunc(void *param)
+void AudioPlayer::audioTask(void *param)
 {
     Serial.println("Audio task started");
 
 
-    if (SoundManager::isBuiltinSelected())
+    String name = currentSound;
+
+    if (SoundManager::isBuiltin(name))
     {
         playBuiltinMelody();
     }
     else
     {
-        String name =
-            SoundManager::getSelectedSound();
-
-        String path =
-            SoundManager::getWavPath(name);
-
-        playWavFile(path);
+        playWavFile(
+            SoundManager::getWavPath(name)
+        );
     }
 
 
@@ -650,6 +917,10 @@ static void audioTaskFunc(void *param)
 
 
     Serial.println("Audio task ended");
+
+    stopAt = 0;
+
+    AudioPlayer::playing = false;
 
     audioTaskHandle = NULL;
 

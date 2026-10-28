@@ -22,6 +22,8 @@ MFRC522 rfid(
 
 bool RFIDManager::detected = false;
 
+bool RFIDManager::connected = false;
+
 String RFIDManager::lastUID = "";
 
 
@@ -56,10 +58,12 @@ void RFIDManager::begin()
         );
 
 
-    if (
-        version == 0x00 ||
-        version == 0xFF
-    )
+    connected =
+        version != 0x00 &&
+        version != 0xFF;
+
+
+    if (!connected)
     {
         Serial.println(
             "RC522 NOT FOUND!"
@@ -208,4 +212,14 @@ bool RFIDManager::cardDetected()
 String RFIDManager::getLastUID()
 {
     return lastUID;
+}
+
+
+// =====================================================
+// READER FOUND AT STARTUP?
+// =====================================================
+
+bool RFIDManager::isConnected()
+{
+    return connected;
 }

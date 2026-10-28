@@ -148,6 +148,17 @@ void loop()
         AlarmManager::isActive()
     )
     {
+        // A web "Test" preview may be playing;
+        // the real alarm takes over
+
+        if (
+            AudioPlayer::isPreview()
+        )
+        {
+            AudioPlayer::stop();
+        }
+
+
         if (
             !AudioPlayer::isPlaying()
         )

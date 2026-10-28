@@ -15,9 +15,13 @@ public:
 
     static String getLastUID();
 
+    static bool isConnected();
+
 private:
 
     static bool detected;
+
+    static bool connected;
 
     static String lastUID;
 

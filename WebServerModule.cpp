@@ -6,6 +6,7 @@
 #include "TimeManager.h"
 #include "AudioPlayer.h"
 #include "SoundManager.h"
+#include "RFIDManager.h"
 
 #include <WiFi.h>
 #include <WebServer.h>
@@ -21,6 +22,13 @@ WebServer server(WEB_SERVER_PORT);
 
 static File uploadFile;
 
+// Name the current upload is stored as, and why it
+// failed ("" = OK). Reported by the completion handler.
+
+static String uploadName;
+
+static String uploadError;
+
 
 
 // =====================================================
@@ -32,248 +40,251 @@ static const char PAGE_HTML[] PROGMEM = R"rawliteral(
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Smart RFID Alarm Clock</title>
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#f5f4f0" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0f0f10" media="(prefers-color-scheme: dark)">
+<title>Alarm Clock</title>
 <style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{font-family:'Segoe UI',system-ui,sans-serif;background:#0f0f1a;color:#e0e0e0;min-height:100vh;display:flex;justify-content:center;align-items:flex-start;padding:20px}
-.container{max-width:420px;width:100%}
-.card{background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);border-radius:16px;padding:24px;margin-bottom:16px;border:1px solid rgba(255,255,255,0.06);box-shadow:0 8px 32px rgba(0,0,0,0.4)}
-h1{text-align:center;font-size:1.4em;color:#64ffda;margin-bottom:4px;letter-spacing:1px}
-.subtitle{text-align:center;font-size:0.75em;color:#888;margin-bottom:16px}
-.clock{text-align:center;font-size:3em;font-weight:700;color:#fff;letter-spacing:2px;margin:8px 0;font-variant-numeric:tabular-nums}
-.date{text-align:center;color:#888;font-size:0.85em;margin-bottom:4px}
-.status-bar{display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin-top:12px}
-.status-dot{display:flex;align-items:center;gap:4px;font-size:0.7em;color:#aaa}
-.status-dot .dot{width:8px;height:8px;border-radius:50%;background:#555}
-.status-dot .dot.on{background:#4caf50;box-shadow:0 0 6px #4caf50}
-.status-dot .dot.alarm{background:#ff5252;box-shadow:0 0 8px #ff5252;animation:pulse 1s infinite}
-@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}
-.section-title{font-size:0.85em;color:#64ffda;margin-bottom:12px;text-transform:uppercase;letter-spacing:1px}
-.row{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
-.row label{font-size:0.9em;color:#ccc}
-select,input[type=range]{background:#0d1117;color:#e0e0e0;border:1px solid #333;border-radius:8px;padding:6px 10px;font-size:0.9em}
-select{min-width:70px;cursor:pointer}
-select:focus{outline:none;border-color:#64ffda}
-.toggle{position:relative;width:48px;height:26px;cursor:pointer}
-.toggle input{opacity:0;width:0;height:0}
-.toggle .slider{position:absolute;top:0;left:0;right:0;bottom:0;background:#333;border-radius:26px;transition:.3s}
-.toggle .slider:before{content:'';position:absolute;width:20px;height:20px;left:3px;bottom:3px;background:#888;border-radius:50%;transition:.3s}
-.toggle input:checked+.slider{background:#1b5e20}
-.toggle input:checked+.slider:before{transform:translateX(22px);background:#64ffda}
-input[type=range]{-webkit-appearance:none;width:140px;height:6px;border:none;border-radius:3px;background:#333;padding:0}
-input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;height:18px;border-radius:50%;background:#64ffda;cursor:pointer}
-.vol-val{font-size:0.85em;color:#64ffda;min-width:32px;text-align:right}
-.btn{display:block;width:100%;padding:12px;border:none;border-radius:10px;font-size:0.95em;font-weight:600;cursor:pointer;transition:all .2s;margin-top:8px}
-.btn-primary{background:linear-gradient(135deg,#64ffda 0%,#00bfa5 100%);color:#0f0f1a}
-.btn-primary:hover{transform:translateY(-1px);box-shadow:0 4px 16px rgba(100,255,218,0.3)}
-.btn-danger{background:linear-gradient(135deg,#ff5252 0%,#d32f2f 100%);color:#fff;font-size:0.8em;padding:8px;margin-top:4px}
-.btn-danger:hover{box-shadow:0 4px 12px rgba(255,82,82,0.3)}
-.upload-zone{border:2px dashed #333;border-radius:12px;padding:20px;text-align:center;cursor:pointer;transition:all .3s;margin-top:8px}
-.upload-zone:hover{border-color:#64ffda;background:rgba(100,255,218,0.03)}
-.upload-zone.dragover{border-color:#64ffda;background:rgba(100,255,218,0.08)}
-.upload-zone input{display:none}
-.upload-zone p{color:#888;font-size:0.85em;margin-top:8px}
-.upload-icon{font-size:2em;color:#64ffda}
-.sound-item{display:flex;align-items:center;justify-content:space-between;padding:8px 12px;background:rgba(255,255,255,0.03);border-radius:8px;margin-bottom:6px}
-.sound-item .name{font-size:0.85em;color:#ccc;flex:1}
-.sound-item .del-btn{background:none;border:none;color:#ff5252;cursor:pointer;font-size:0.8em;padding:4px 8px;border-radius:4px}
-.sound-item .del-btn:hover{background:rgba(255,82,82,0.15)}
-.msg{text-align:center;font-size:0.8em;padding:8px;border-radius:6px;margin-top:8px;display:none}
-.msg.ok{display:block;background:rgba(76,175,80,0.15);color:#4caf50}
-.msg.err{display:block;background:rgba(255,82,82,0.15);color:#ff5252}
-.progress{width:100%;height:4px;background:#333;border-radius:2px;margin-top:8px;display:none;overflow:hidden}
-.progress .bar{height:100%;background:#64ffda;border-radius:2px;width:0%;transition:width .3s}
+:root{--bg:#f5f4f0;--surface:#fff;--surface-2:#efede8;--text:#1c1c1e;--muted:#6f6e6b;--line:#e7e4de;--accent:#c4651f;--accent-soft:#f7e9dd;--on-accent:#fff;--ok:#2f8a57;--bad:#c4473a;--shadow:0 1px 2px rgba(0,0,0,.04),0 6px 20px rgba(0,0,0,.04);color-scheme:light}
+@media (prefers-color-scheme:dark){:root{--bg:#0f0f10;--surface:#19191b;--surface-2:#242427;--text:#f2f2f0;--muted:#9a9995;--line:#2a2a2d;--accent:#f0a360;--accent-soft:#33261a;--on-accent:#1b1206;--ok:#5cc28a;--bad:#ef7363;--shadow:none;color-scheme:dark}}
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+html{-webkit-text-size-adjust:100%}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,system-ui,sans-serif;background:var(--bg);color:var(--text);line-height:1.4;padding:max(16px,env(safe-area-inset-top)) max(16px,env(safe-area-inset-right)) calc(32px + env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left));min-height:100vh}
+button,input{font:inherit;color:inherit}
+button{background:none;border:0;cursor:pointer}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:8px}
+.wrap{max-width:460px;margin:0 auto}
+.now{text-align:center;padding:28px 0 22px}
+.now-time{font-size:clamp(60px,19vw,88px);font-weight:300;letter-spacing:-.03em;line-height:1;font-variant-numeric:tabular-nums}
+.now-time small{font-size:.28em;font-weight:500;letter-spacing:0;color:var(--muted);margin-left:6px}
+.now-date{color:var(--muted);font-size:15px;margin-top:10px}
+.chips{display:flex;justify-content:center;gap:6px;flex-wrap:wrap;margin-top:16px}
+.chip{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:500;color:var(--muted);background:var(--surface-2);padding:5px 10px;border-radius:999px}
+.chip i{width:6px;height:6px;border-radius:50%;background:var(--bad)}
+.chip.ok i{background:var(--ok)}
+.ring{display:none;background:var(--accent);color:var(--on-accent);border-radius:20px;padding:16px 20px;margin-bottom:12px;animation:glow 1.6s ease-in-out infinite}
+.ring.on{display:block}
+.ring b{display:block;font-size:17px}
+.ring span{font-size:14px;opacity:.85}
+@keyframes glow{50%{opacity:.82}}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:20px;padding:20px;margin-bottom:12px;box-shadow:var(--shadow)}
+.head{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.label{font-size:13px;font-weight:600;color:var(--muted);letter-spacing:.02em}
+.alarm-time{display:block;width:100%;border:0;background:none;font-size:clamp(52px,16vw,68px);font-weight:300;letter-spacing:-.02em;font-variant-numeric:tabular-nums;padding:6px 0 2px;cursor:pointer;transition:opacity .2s}
+.alarm-time::-webkit-calendar-picker-indicator{display:none}
+.alarm-time:focus{outline:none}
+.off .alarm-time{opacity:.35}
+.hint{font-size:14px;color:var(--muted)}
+.hint b{color:var(--text);font-weight:600}
+.off .hint b{color:var(--muted)}
+.switch{position:relative;width:51px;height:31px;flex:none}
+.switch input{position:absolute;opacity:0;inset:0;cursor:pointer;z-index:1}
+.switch span{position:absolute;inset:0;background:var(--line);border-radius:31px;transition:background .2s}
+.switch span:after{content:"";position:absolute;width:27px;height:27px;left:2px;top:2px;background:#fff;border-radius:50%;box-shadow:0 1px 3px rgba(0,0,0,.25);transition:transform .2s}
+.switch input:checked+span{background:var(--accent)}
+.switch input:checked+span:after{transform:translateX(20px)}
+.vol{display:flex;align-items:center;gap:14px;margin-top:14px}
+.vol output{font-size:14px;font-variant-numeric:tabular-nums;color:var(--muted);min-width:38px;text-align:right}
+input[type=range]{-webkit-appearance:none;appearance:none;flex:1;height:32px;background:none;cursor:pointer}
+input[type=range]::-webkit-slider-runnable-track{height:6px;border-radius:3px;background:linear-gradient(to right,var(--accent) var(--p,100%),var(--line) var(--p,100%))}
+input[type=range]::-moz-range-track{height:6px;border-radius:3px;background:var(--line)}
+input[type=range]::-moz-range-progress{height:6px;border-radius:3px;background:var(--accent)}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:24px;height:24px;margin-top:-9px;border-radius:50%;background:#fff;border:0;box-shadow:0 1px 4px rgba(0,0,0,.3)}
+input[type=range]::-moz-range-thumb{width:24px;height:24px;border-radius:50%;background:#fff;border:0;box-shadow:0 1px 4px rgba(0,0,0,.3)}
+.list{margin:6px -8px 0}
+.snd{display:flex;align-items:center;gap:12px;min-height:56px;padding:4px 8px;border-radius:14px;cursor:pointer;transition:background .15s}
+.snd:hover{background:var(--surface-2)}
+.snd.sel{background:var(--accent-soft)}
+.radio{width:22px;height:22px;flex:none;border-radius:50%;border:2px solid var(--line);display:grid;place-items:center;transition:border-color .15s}
+.sel .radio{border-color:var(--accent)}
+.sel .radio:after{content:"";width:10px;height:10px;border-radius:50%;background:var(--accent)}
+.snd .name{flex:1;min-width:0;font-size:15px;line-height:1.3;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;margin:6px 0}
+.snd .name small{display:block;font-size:12px;color:var(--muted)}
+.icon{width:40px;height:40px;flex:none;display:grid;place-items:center;border-radius:12px;color:var(--muted);transition:background .15s,color .15s}
+.icon:hover{background:var(--surface);color:var(--text)}
+.icon svg{width:20px;height:20px;fill:currentColor}
+.icon.playing{color:var(--accent)}
+.del.confirm{width:auto;padding:0 12px;color:var(--bad);font-size:13px;font-weight:600}
+.add{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;min-height:52px;margin-top:10px;border:1.5px dashed var(--line);border-radius:14px;color:var(--accent);font-weight:600;font-size:15px;transition:background .15s}
+.add:hover{background:var(--surface-2)}
+.add:disabled{opacity:.5;cursor:default}
+.bar{height:4px;border-radius:2px;background:var(--line);overflow:hidden;margin-top:10px;display:none}
+.bar div{height:100%;width:0;background:var(--accent);transition:width .2s}
+.foot{font-size:12px;color:var(--muted);text-align:center;margin-top:10px}
+.toast{position:fixed;left:50%;bottom:calc(24px + env(safe-area-inset-bottom));transform:translate(-50%,20px);background:var(--text);color:var(--bg);font-size:14px;font-weight:500;padding:10px 18px;border-radius:999px;opacity:0;pointer-events:none;transition:opacity .2s,transform .2s;max-width:calc(100% - 32px);text-align:center}
+.toast.show{opacity:1;transform:translate(-50%,0)}
+.toast.err{background:var(--bad);color:#fff}
 </style>
 </head>
 <body>
-<div class="container">
+<div class="wrap">
 
-<div class="card">
-<h1>&#9200; Smart Alarm Clock</h1>
-<p class="subtitle">RFID Dismiss &bull; v2.0</p>
-<div class="clock" id="clock">--:--:--</div>
-<div class="date" id="date">---</div>
-<div class="status-bar">
-<div class="status-dot"><span class="dot" id="st-wifi"></span>WiFi</div>
-<div class="status-dot"><span class="dot" id="st-ntp"></span>NTP</div>
-<div class="status-dot"><span class="dot" id="st-rfid"></span>RFID</div>
-<div class="status-dot"><span class="dot" id="st-alarm"></span>Alarm</div>
+<header class="now">
+<div class="now-time" id="now">--:--</div>
+<div class="now-date" id="date">Connecting&hellip;</div>
+<div class="chips">
+<span class="chip" id="c-wifi"><i></i>Wi-Fi</span>
+<span class="chip" id="c-ntp"><i></i>Time</span>
+<span class="chip" id="c-rfid"><i></i>Reader</span>
 </div>
-</div>
+</header>
 
-<div class="card">
-<div class="section-title">Alarm Settings</div>
-<div class="row">
-<label>Hour</label>
-<select id="hour"></select>
-</div>
-<div class="row">
-<label>Minute</label>
-<select id="minute"></select>
-</div>
-<div class="row">
-<label>AM / PM</label>
-<select id="ampm"><option value="0">AM</option><option value="1">PM</option></select>
-</div>
-<div class="row">
-<label>Enabled</label>
-<label class="toggle"><input type="checkbox" id="enabled"><span class="slider"></span></label>
-</div>
-<div class="row">
-<label>Volume</label>
-<input type="range" id="volume" min="0" max="100" value="100">
-<span class="vol-val" id="vol-val">100</span>
-</div>
-<div class="row">
-<label>Sound</label>
-<select id="sound"></select>
-</div>
-<button class="btn btn-primary" onclick="saveSettings()">Save Settings</button>
-<div class="msg" id="save-msg"></div>
-</div>
+<div class="ring" id="ring"><b>Alarm ringing</b><span>Scan your RFID tag to stop it</span></div>
 
-<div class="card">
-<div class="section-title">Upload WAV Sound</div>
-<div class="upload-zone" id="drop-zone">
-<div class="upload-icon">&#127925;</div>
-<p>Tap to select or drag a .wav file</p>
-<p style="font-size:0.7em;color:#666">16-bit PCM &bull; Max 500KB</p>
-<input type="file" id="wav-file" accept=".wav">
+<section class="card" id="alarm">
+<div class="head">
+<span class="label">ALARM</span>
+<label class="switch"><input type="checkbox" id="enabled" aria-label="Alarm on or off"><span></span></label>
 </div>
-<div class="progress" id="progress"><div class="bar" id="progress-bar"></div></div>
-<div class="msg" id="upload-msg"></div>
+<input type="time" class="alarm-time" id="time" aria-label="Alarm time">
+<div class="hint" id="until">&nbsp;</div>
+<div class="vol">
+<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" style="color:var(--muted);flex:none" aria-hidden="true"><path d="M3 10v4h4l5 5V5L7 10H3zm13.5 2A4.5 4.5 0 0 0 14 8v8a4.5 4.5 0 0 0 2.5-4z"/></svg>
+<input type="range" id="vol" min="0" max="100" step="5" aria-label="Volume">
+<output id="vol-val">100%</output>
 </div>
+</section>
 
-<div class="card">
-<div class="section-title">Uploaded Sounds</div>
-<div id="sound-list"></div>
-</div>
+<section class="card">
+<span class="label">SOUND</span>
+<div class="list" id="list"></div>
+<button class="add" id="add"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6z"/></svg><span id="add-txt">Add sound</span></button>
+<div class="bar" id="bar"><div id="bar-fill"></div></div>
+<input type="file" id="file" accept=".wav,audio/wav" hidden>
+<p class="foot">WAV &middot; 8 or 16-bit &middot; up to 500 KB &middot; 5 sounds max</p>
+</section>
 
 </div>
+<div class="toast" id="toast"></div>
 
 <script>
-// Populate hour/minute dropdowns
-const hSel=document.getElementById('hour');
-const mSel=document.getElementById('minute');
-for(let i=1;i<=12;i++){let o=document.createElement('option');o.value=i;o.text=i<10?'0'+i:''+i;hSel.appendChild(o)}
-for(let i=0;i<60;i++){let o=document.createElement('option');o.value=i;o.text=i<10?'0'+i:''+i;mSel.appendChild(o)}
+const $=id=>document.getElementById(id);
+const PLAY='<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>';
+const STOP='<svg viewBox="0 0 24 24"><path d="M7 7h10v10H7z"/></svg>';
+const TRASH='<svg viewBox="0 0 24 24"><path d="M9 3h6l1 2h4v2H4V5h4zm-3 6h12l-1 12H7z"/></svg>';
+let S=null,sounds=[],playing=null,playTimer=null,nowMin=null;
 
-const volSlider=document.getElementById('volume');
-const volVal=document.getElementById('vol-val');
-volSlider.oninput=()=>volVal.textContent=volSlider.value;
+function toast(msg,err){const t=$('toast');t.textContent=msg;t.className='toast show'+(err?' err':'');clearTimeout(t._h);t._h=setTimeout(()=>t.className='toast'+(err?' err':''),2200)}
+function api(url,opt){return fetch(url,opt).then(r=>r.json().catch(()=>({})).then(d=>{if(!r.ok||d.ok===false)throw new Error(d.msg||'Something went wrong');return d}))}
+const pad=n=>String(n).padStart(2,'0');
+const pretty=s=>s==='builtin'?'Classic chime':s.replace(/\.wav$/i,'').replace(/[_]+/g,' ').trim();
 
-// Poll status every 1s
+// ---------- status ----------
 function poll(){
 fetch('/api/status').then(r=>r.json()).then(d=>{
-document.getElementById('clock').textContent=d.time||'--:--:--';
-document.getElementById('date').textContent=d.date||'---';
-const w=d.wifi,n=d.ntp,r2=d.rfid,a=d.alarmActive;
-document.getElementById('st-wifi').className='dot'+(w?' on':'');
-document.getElementById('st-ntp').className='dot'+(n?' on':'');
-document.getElementById('st-rfid').className='dot'+(r2?' on':'');
-document.getElementById('st-alarm').className='dot'+(a?' on alarm':'');
-}).catch(()=>{});
-}
-setInterval(poll,1000);poll();
-
-// Load settings
-function loadSettings(){
-fetch('/api/settings').then(r=>r.json()).then(d=>{
-hSel.value=d.hour;
-mSel.value=d.minute;
-document.getElementById('ampm').value=d.pm?'1':'0';
-document.getElementById('enabled').checked=d.enabled;
-volSlider.value=d.volume;volVal.textContent=d.volume;
-loadSounds(d.sound);
-}).catch(()=>{});
+const m=/(\d+):(\d+):(\d+) (AM|PM)/.exec(d.time||'');
+if(m&&d.ntp){
+$('now').innerHTML=(+m[1])+':'+m[2]+'<small>'+m[4]+'</small>';
+nowMin=(+m[1]%12+(m[4]==='PM'?12:0))*60+(+m[2]);
+const dm=/(\d+)\/(\d+)\/(\d+)/.exec(d.date||'');
+if(dm)$('date').textContent=new Date(+dm[3],+dm[2]-1,+dm[1]).toLocaleDateString(undefined,{weekday:'long',day:'numeric',month:'long'});
+}else{$('now').textContent='--:--';$('date').textContent='Waiting for time sync';nowMin=null}
+$('c-wifi').className='chip'+(d.wifi?' ok':'');
+$('c-ntp').className='chip'+(d.ntp?' ok':'');
+$('c-rfid').className='chip'+(d.rfid?' ok':'');
+$('ring').className='ring'+(d.alarmActive?' on':'');
+until();
+}).catch(()=>{$('date').textContent='Clock offline';['c-wifi','c-ntp','c-rfid'].forEach(i=>$(i).className='chip')});
 }
 
-function loadSounds(selected){
-fetch('/api/sounds').then(r=>r.json()).then(list=>{
-const sel=document.getElementById('sound');
-sel.innerHTML='';
-list.forEach(s=>{
-let o=document.createElement('option');
-o.value=s;o.text=s==='builtin'?'Built-in Tone':s;
-if(s===selected)o.selected=true;
-sel.appendChild(o);
+// ---------- alarm ----------
+function until(){
+if(!S)return;
+$('alarm').className='card'+(S.enabled?'':' off');
+if(!S.enabled){$('until').innerHTML='Alarm is <b>off</b>';return}
+if(nowMin===null){$('until').innerHTML='<b>On</b>';return}
+const a=(S.hour%12+(S.pm?12:0))*60+S.minute;
+let diff=(a-nowMin+1440)%1440;if(diff===0)diff=1440;
+const h=Math.floor(diff/60),mi=diff%60;
+$('until').innerHTML='Rings in <b>'+(h?h+' h ':'')+(mi||!h?mi+' min':'')+'</b>';
+}
+function renderAlarm(){
+if(document.activeElement!==$('time'))$('time').value=pad(S.hour%12+(S.pm?12:0))+':'+pad(S.minute);
+$('enabled').checked=S.enabled;
+setVol(S.volume);
+until();
+}
+function setVol(v){$('vol').value=v;$('vol').style.setProperty('--p',v+'%');$('vol-val').textContent=v+'%'}
+function save(patch,msg){
+Object.assign(S,patch);until();
+return api('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(patch)})
+.then(()=>{if(msg)toast(msg);if(playing){playing=null;renderList()}}).catch(e=>{toast(e.message,1);load()});
+}
+$('time').addEventListener('change',e=>{
+const v=e.target.value;if(!v)return;
+const [h,m]=v.split(':').map(Number);
+save({hour:h%12||12,minute:m,pm:h>=12,enabled:true},'Alarm set for '+((h%12)||12)+':'+pad(m)+(h>=12?' PM':' AM'));
 });
-// Sound list
-const div=document.getElementById('sound-list');
-div.innerHTML='';
-list.forEach(s=>{
-if(s==='builtin')return;
-let item=document.createElement('div');
-item.className='sound-item';
-item.innerHTML='<span class="name">'+s+'</span><button class="del-btn" onclick="delSound(\''+s+'\')">Delete</button>';
-div.appendChild(item);
+$('time').addEventListener('click',e=>{try{e.target.showPicker()}catch(_){}});
+$('enabled').addEventListener('change',e=>save({enabled:e.target.checked},e.target.checked?'Alarm on':'Alarm off'));
+$('vol').addEventListener('input',e=>setVol(e.target.value));
+$('vol').addEventListener('change',e=>save({volume:+e.target.value},'Volume '+e.target.value+'%'));
+
+// ---------- sounds ----------
+function renderList(){
+const L=$('list');L.innerHTML='';
+sounds.forEach(s=>{
+const row=document.createElement('div');
+row.className='snd'+(S&&S.sound===s?' sel':'');
+row.setAttribute('role','radio');row.setAttribute('aria-checked',S&&S.sound===s);row.tabIndex=0;
+row.innerHTML='<span class="radio"></span><span class="name"></span>';
+row.querySelector('.name').textContent=pretty(s);
+if(s==='builtin')row.querySelector('.name').insertAdjacentHTML('beforeend','<small>Built in</small>');
+const p=document.createElement('button');
+p.className='icon'+(playing===s?' playing':'');p.innerHTML=playing===s?STOP:PLAY;p.setAttribute('aria-label',playing===s?'Stop preview':'Preview');
+p.onclick=e=>{e.stopPropagation();preview(s)};
+row.appendChild(p);
+if(s!=='builtin'){
+const d=document.createElement('button');
+d.className='icon del';d.innerHTML=TRASH;d.setAttribute('aria-label','Delete');
+d.onclick=e=>{e.stopPropagation();
+if(!d.classList.contains('confirm')){d.classList.add('confirm');d.textContent='Delete?';setTimeout(()=>{if(d.isConnected){d.classList.remove('confirm');d.innerHTML=TRASH}},3000);return}
+api('/api/delete?name='+encodeURIComponent(s),{method:'DELETE'}).then(()=>{toast('Sound deleted');if(playing===s)playing=null;load()}).catch(e=>toast(e.message,1));
+};
+row.appendChild(d);
+}
+const pick=()=>{if(S.sound!==s){save({sound:s},pretty(s)+' selected');renderList()}};
+row.onclick=pick;row.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();pick()}};
+L.appendChild(row);
 });
-if(list.length<=1)div.innerHTML='<p style="color:#666;font-size:0.8em;text-align:center">No custom sounds uploaded</p>';
-}).catch(()=>{});
+$('add').disabled=sounds.length>5;
+$('add-txt').textContent=sounds.length>5?'Sound limit reached':'Add sound';
 }
-loadSettings();
+function preview(s){
+clearTimeout(playTimer);
+if(playing===s){playing=null;renderList();api('/api/test/stop',{method:'POST'}).catch(()=>{});return}
+api('/api/test?sound='+encodeURIComponent(s),{method:'POST'}).then(()=>{
+playing=s;renderList();
+playTimer=setTimeout(()=>{playing=null;renderList()},15000);
+}).catch(e=>toast(e.message,1));
+}
 
-// Save
-function saveSettings(){
-const body={
-hour:parseInt(hSel.value),
-minute:parseInt(mSel.value),
-pm:document.getElementById('ampm').value==='1',
-enabled:document.getElementById('enabled').checked,
-volume:parseInt(volSlider.value),
-sound:document.getElementById('sound').value
+// ---------- upload ----------
+$('add').onclick=()=>$('file').click();
+$('file').onchange=()=>{
+const f=$('file').files[0];$('file').value='';
+if(!f)return;
+if(!/\.wav$/i.test(f.name)){toast('Please choose a .wav file',1);return}
+if(f.size>500*1024){toast('File is too large (max 500 KB)',1);return}
+const fd=new FormData();fd.append('file',f);
+const x=new XMLHttpRequest();
+$('bar').style.display='block';$('bar-fill').style.width='0';$('add').disabled=true;$('add-txt').textContent='Uploading...';
+x.upload.onprogress=e=>{if(e.lengthComputable)$('bar-fill').style.width=(e.loaded/e.total*100)+'%'};
+x.onloadend=()=>{
+$('bar').style.display='none';$('add').disabled=false;
+let d={};try{d=JSON.parse(x.responseText)}catch(_){}
+if(x.status===200&&d.ok){S.sound=d.name;save({sound:d.name},'Added and selected').then(load)}
+else{toast(d.msg||'Upload failed',1);load()}
 };
-fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
-.then(r=>r.json()).then(d=>{
-showMsg('save-msg',d.ok?'ok':'err',d.msg||'Saved!');
-}).catch(()=>showMsg('save-msg','err','Connection error'));
-}
-
-function showMsg(id,type,text){
-const el=document.getElementById(id);
-el.className='msg '+type;el.textContent=text;
-setTimeout(()=>el.style.display='none',3000);
-el.style.display='block';
-}
-
-// Upload
-const dropZone=document.getElementById('drop-zone');
-const fileInput=document.getElementById('wav-file');
-dropZone.onclick=()=>fileInput.click();
-dropZone.ondragover=e=>{e.preventDefault();dropZone.classList.add('dragover')};
-dropZone.ondragleave=()=>dropZone.classList.remove('dragover');
-dropZone.ondrop=e=>{e.preventDefault();dropZone.classList.remove('dragover');if(e.dataTransfer.files.length)uploadFile(e.dataTransfer.files[0])};
-fileInput.onchange=()=>{if(fileInput.files.length)uploadFile(fileInput.files[0])};
-
-function uploadFile(file){
-if(!file.name.toLowerCase().endsWith('.wav')){showMsg('upload-msg','err','Only .wav files');return}
-if(file.size>500*1024){showMsg('upload-msg','err','File too large (max 500KB)');return}
-const formData=new FormData();
-formData.append('file',file);
-const xhr=new XMLHttpRequest();
-const prog=document.getElementById('progress');
-const bar=document.getElementById('progress-bar');
-prog.style.display='block';bar.style.width='0%';
-xhr.upload.onprogress=e=>{if(e.lengthComputable)bar.style.width=Math.round(e.loaded/e.total*100)+'%'};
-xhr.onload=()=>{
-prog.style.display='none';
-if(xhr.status===200){showMsg('upload-msg','ok','Uploaded!');loadSounds('');loadSettings()}
-else showMsg('upload-msg','err',xhr.responseText||'Upload failed');
+x.open('POST','/api/upload');x.send(fd);
 };
-xhr.onerror=()=>{prog.style.display='none';showMsg('upload-msg','err','Upload error')};
-xhr.open('POST','/api/upload');
-xhr.send(formData);
-}
 
-function delSound(name){
-if(!confirm('Delete '+name+'?'))return;
-fetch('/api/delete?name='+encodeURIComponent(name),{method:'DELETE'})
-.then(r=>r.json()).then(d=>{
-showMsg('upload-msg',d.ok?'ok':'err',d.msg);
-loadSettings();
-}).catch(()=>{});
+// ---------- load ----------
+function load(){
+Promise.all([fetch('/api/settings').then(r=>r.json()),fetch('/api/sounds').then(r=>r.json())])
+.then(([s,l])=>{S=s;sounds=l;renderAlarm();renderList()}).catch(()=>{});
 }
+load();poll();setInterval(poll,1000);
 </script>
 </body>
 </html>
@@ -343,7 +354,7 @@ void WebServerModule::setupRoutes()
             "\"date\":\"%02d/%02d/%04d\","
             "\"wifi\":%s,"
             "\"ntp\":%s,"
-            "\"rfid\":true,"
+            "\"rfid\":%s,"
             "\"alarmActive\":%s"
             "}",
 
@@ -356,6 +367,9 @@ void WebServerModule::setupRoutes()
                 ? "true" : "false",
 
             TimeManager::isSynced()
+                ? "true" : "false",
+
+            RFIDManager::isConnected()
                 ? "true" : "false",
 
             AlarmManager::isActive()
@@ -486,6 +500,21 @@ void WebServerModule::setupRoutes()
                 String snd =
                     body.substring(start, end);
 
+                if (
+                    !SoundManager::isBuiltin(snd) &&
+                    !SoundManager::wavExists(snd)
+                )
+                {
+                    server.send(
+                        400,
+                        "application/json",
+                        "{\"ok\":false,"
+                        "\"msg\":\"Sound file not found\"}"
+                    );
+
+                    return;
+                }
+
                 strncpy(
                     s.soundName,
                     snd.c_str(),
@@ -559,10 +588,23 @@ void WebServerModule::setupRoutes()
         // Completion handler
         []()
         {
+            if (uploadError.length() > 0)
+            {
+                server.send(
+                    400,
+                    "application/json",
+                    "{\"ok\":false,\"msg\":\"" +
+                        uploadError + "\"}"
+                );
+
+                return;
+            }
+
             server.send(
                 200,
-                "text/plain",
-                "OK"
+                "application/json",
+                "{\"ok\":true,\"name\":\"" +
+                    uploadName + "\"}"
             );
         },
 
@@ -572,22 +614,26 @@ void WebServerModule::setupRoutes()
             HTTPUpload &upload =
                 server.upload();
 
-            String filename =
-                upload.filename;
-
 
             if (
                 upload.status ==
                 UPLOAD_FILE_START
             )
             {
+                uploadError = "";
+
+                uploadName =
+                    SoundManager::sanitizeName(
+                        upload.filename
+                    );
+
+
                 // Validate extension
 
-                if (
-                    !filename.endsWith(".wav") &&
-                    !filename.endsWith(".WAV")
-                )
+                if (uploadName.length() == 0)
                 {
+                    uploadError = "Only .wav files";
+
                     Serial.println(
                         "Upload rejected: "
                         "not a .wav file"
@@ -600,10 +646,15 @@ void WebServerModule::setupRoutes()
                 // Check file count
 
                 if (
-                    SoundManager::getSoundCount()
-                    >= (MAX_WAV_FILES + 1)
+                    !SoundManager::hasRoomFor(
+                        uploadName
+                    )
                 )
                 {
+                    uploadError =
+                        "Max " + String(MAX_WAV_FILES) +
+                        " sounds - delete one first";
+
                     Serial.println(
                         "Upload rejected: "
                         "max files reached"
@@ -613,9 +664,21 @@ void WebServerModule::setupRoutes()
                 }
 
 
+                // Don't overwrite a file that is
+                // being played right now
+
+                if (
+                    AudioPlayer::isPlaying() &&
+                    !AlarmManager::isActive()
+                )
+                {
+                    AudioPlayer::stop();
+                }
+
+
                 String path =
                     SoundManager::getWavPath(
-                        filename
+                        uploadName
                     );
 
                 Serial.printf(
@@ -629,6 +692,11 @@ void WebServerModule::setupRoutes()
                         path,
                         FILE_WRITE
                     );
+
+                if (!uploadFile)
+                {
+                    uploadError = "Could not create file";
+                }
             }
 
 
@@ -639,10 +707,39 @@ void WebServerModule::setupRoutes()
             {
                 if (uploadFile)
                 {
-                    uploadFile.write(
-                        upload.buf,
-                        upload.currentSize
-                    );
+                    bool tooBig =
+                        upload.totalSize >
+                        MAX_WAV_FILE_SIZE;
+
+                    size_t written = 0;
+
+                    if (!tooBig)
+                    {
+                        written = uploadFile.write(
+                            upload.buf,
+                            upload.currentSize
+                        );
+                    }
+
+
+                    if (
+                        tooBig ||
+                        written != upload.currentSize
+                    )
+                    {
+                        uploadError =
+                            tooBig
+                                ? "File too large (max 500KB)"
+                                : "Storage full";
+
+                        uploadFile.close();
+
+                        LittleFS.remove(
+                            SoundManager::getWavPath(
+                                uploadName
+                            )
+                        );
+                    }
                 }
             }
 
@@ -658,18 +755,133 @@ void WebServerModule::setupRoutes()
 
                     Serial.printf(
                         "Upload done: %s "
-                        "(%d bytes)\n",
-                        filename.c_str(),
-                        upload.totalSize
+                        "(%u bytes)\n",
+                        uploadName.c_str(),
+                        (unsigned)upload.totalSize
                     );
 
-                    SoundManager::addSound(
-                        filename
+
+                    // Make sure we can actually
+                    // play it, otherwise the alarm
+                    // would silently fall back to
+                    // the built-in tone
+
+                    String path =
+                        SoundManager::getWavPath(
+                            uploadName
+                        );
+
+                    String error;
+
+                    if (
+                        !AudioPlayer::checkWavFile(
+                            path,
+                            error
+                        )
+                    )
+                    {
+                        uploadError =
+                            "Unsupported WAV: " + error;
+
+                        Serial.printf(
+                            "Upload rejected: %s\n",
+                            error.c_str()
+                        );
+
+                        LittleFS.remove(path);
+                    }
+                }
+
+                SoundManager::rescan();
+            }
+
+
+            if (
+                upload.status ==
+                UPLOAD_FILE_ABORTED
+            )
+            {
+                uploadError = "Upload aborted";
+
+                if (uploadFile)
+                {
+                    uploadFile.close();
+
+                    LittleFS.remove(
+                        SoundManager::getWavPath(
+                            uploadName
+                        )
                     );
                 }
+
+                SoundManager::rescan();
             }
         }
     );
+
+
+    // -------------------------------------------------
+    // TEST SOUND (15 second preview)
+    // -------------------------------------------------
+
+    server.on("/api/test", HTTP_POST, []()
+    {
+        if (AlarmManager::isActive())
+        {
+            server.send(
+                409,
+                "application/json",
+                "{\"ok\":false,"
+                "\"msg\":\"Alarm is ringing\"}"
+            );
+
+            return;
+        }
+
+
+        String name = server.arg("sound");
+
+        if (
+            !SoundManager::isBuiltin(name) &&
+            !SoundManager::wavExists(name)
+        )
+        {
+            server.send(
+                404,
+                "application/json",
+                "{\"ok\":false,"
+                "\"msg\":\"Sound not found\"}"
+            );
+
+            return;
+        }
+
+
+        AudioPlayer::stop();
+
+        AudioPlayer::start(name, 15000);
+
+        server.send(
+            200,
+            "application/json",
+            "{\"ok\":true}"
+        );
+    });
+
+
+    server.on("/api/test/stop", HTTP_POST, []()
+    {
+        if (!AlarmManager::isActive())
+        {
+            AudioPlayer::stop();
+        }
+
+        server.send(
+            200,
+            "application/json",
+            "{\"ok\":true}"
+        );
+    });
 
 
     // -------------------------------------------------
@@ -705,6 +917,13 @@ void WebServerModule::setupRoutes()
 
             return;
         }
+
+
+        // Don't delete a file while it's playing.
+        // If the alarm is ringing, the main loop
+        // restarts it with the built-in tone.
+
+        AudioPlayer::stop();
 
 
         bool ok =
